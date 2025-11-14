@@ -81,22 +81,53 @@ class Minorloop(BaseModel):
             })
         return dict
 
+    # def save_current_results(self):
+    #     ret_path = []
+    #     ret_result = []
+    #     for idx in range(self.batch_size):
+    #         ret_path.append('GT_{}'.format(self.path[idx]))
+    #         ret_result.append(self.gt_image[idx].detach().float().cpu())
+
+    #         ret_path.append('Process_{}'.format(self.path[idx]))
+    #         ret_result.append(self.visuals[idx::self.batch_size].detach().float().cpu())
+            
+    #         ret_path.append('Out_{}'.format(self.path[idx]))
+    #         ret_result.append(self.visuals[idx-self.batch_size].detach().float().cpu())
+        
+    #     if self.task in ['inpainting','uncropping']:
+    #         ret_path.extend(['Mask_{}'.format(name) for name in self.path])
+    #         ret_result.extend(self.mask_image)
+
+    #     self.results_dict = self.results_dict._replace(name=ret_path, result=ret_result)
+    #     return self.results_dict._asdict()
+
+
     def save_current_results(self):
         ret_path = []
         ret_result = []
-        for idx in range(self.batch_size):
-            ret_path.append('GT_{}'.format(self.path[idx]))
-            ret_result.append(self.gt_image[idx].detach().float().cpu())
 
-            ret_path.append('Process_{}'.format(self.path[idx]))
-            ret_result.append(self.visuals[idx::self.batch_size].detach().float().cpu())
-            
-            ret_path.append('Out_{}'.format(self.path[idx]))
-            ret_result.append(self.visuals[idx-self.batch_size].detach().float().cpu())
-        
-        if self.task in ['inpainting','uncropping']:
-            ret_path.extend(['Mask_{}'.format(name) for name in self.path])
-            ret_result.extend(self.mask_image)
+        for idx in range(self.batch_size):
+            # GT
+            ret_path.append('GT_{}.png'.format(self.path[idx]))
+            gt_img = self.gt_image[idx].detach().cpu()  # Tensor behalten
+            ret_result.append(gt_img)
+
+            # Processed / visual
+            ret_path.append('Process_{}.png'.format(self.path[idx]))
+            vis_img = self.visuals[idx::self.batch_size].detach().cpu()
+            ret_result.extend(vis_img)  # Liste der Tensoren
+
+            # Output
+            ret_path.append('Out_{}.png'.format(self.path[idx]))
+            out_img = self.visuals[idx - self.batch_size].detach().cpu()
+            ret_result.append(out_img)
+
+        # Optional Mask
+        if self.task in ['inpainting', 'uncropping']:
+            for i, name in enumerate(self.path):
+                ret_path.append('Mask_{}.png'.format(name))
+                mask_img = self.mask_image[i].detach().cpu()
+                ret_result.append(mask_img)
 
         self.results_dict = self.results_dict._replace(name=ret_path, result=ret_result)
         return self.results_dict._asdict()

@@ -100,7 +100,7 @@ opt['path']['tb_logger'] = '/hs/babbage/data/group-brueggen/David/diffusion/Mino
 writer = VisualWriter(opt, logger=logger)
 
 train_dataset = NpySkyDataset("/hs/babbage/data/group-brueggen/David/kevin_data/")
-val_dataset = NpySkyDataset("/hs/babbage/data/group-brueggen/David/kevin_data/")
+val_dataset = NpySkyDataset("/hs/babbage/data/group-brueggen/David/kevin_data/subsample_val/")
 
 train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4, drop_last=True)
 val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4)
