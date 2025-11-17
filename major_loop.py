@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 from joblib import Parallel, delayed
 from finufft import CupyFinufft
@@ -29,10 +30,13 @@ class reconstruction_loop:
     
     def __next__(self):
         if self.current_cycle > self.num_max_major_cycle:
+            print("Reached maximum number of major cycles.")
             raise StopIteration
         if self.resmean <= self.max_resmean and self.resmean != -1:
+            print(f"Stopping at major cycle {self.current_cycle} with residual mean {self.resmean}")
             raise StopIteration
         self.current_epoch +=1
+        self.model_image = None
         if self.current_epoch > self.epochs:
             self.current_cycle += 1
             self.current_epoch = 0
@@ -45,15 +49,35 @@ class reconstruction_loop:
         y = start_percentile + (end_percentile - start_percentile) * (1 - (1 - x)**k)
         y=torch.flip(y, dims=[0])
         percentile_gt = torch.quantile(torch.abs(ground_truth), y[self.current_cycle] / 100.0)
+        return percentile_gt
 
     
 
     def minor_cycle_step(self, residual_image, sky_image, train_cycle):
+        if residual_image.dim() == 3:
+            residual_image = residual_image.unsqueeze(1)  # (B,1,H,W)
+
+        if sky_image.dim() == 3:
+            sky_image = sky_image.unsqueeze(1)
+
         train = train_cycle==self.current_cycle
+
         if train:
             loss_image=self.loss_percentile_scheduler(sky_image)
             self.unet.train()
             self.optimizer.zero_grad()
+            prediction = self.unet(residual_image, conditioning=train_cycle)
+            self.model_image = self.model_image + prediction if self.model_image is not None else prediction
+            loss = F.l1_loss(self.model_image, loss_image)
+            loss.backward()
+            self.optimizer.step()
+        else:
+            self.unet.eval()
+            with torch.no_grad():
+                prediction = self.unet(residual_image, conditioning=train_cycle)
+                self.model_image = self.model_image + prediction if self.model_image is not None else prediction
+
+
         
 
 
@@ -72,7 +96,6 @@ class reconstruction_loop:
             residual_vis = vis - self.model_vis
             residual_image = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.ift)(residual_vis, lmn[i,:, 0], lmn[i,:, 1], lmn[i,:, 2], uvw[i,:, 0], uvw[i,:, 1], uvw[i,:, 2]) for i in range(batchsize))
             residual_image = torch.tensor(residual_image)
-            prediction_image = self.minor_cycle_step(residual_image, y, train_cycle=i)
-            self.model_image = self.model_image + prediction_image if self.model_image is not None else prediction_image
+            self.minor_cycle_step(residual_image, y, train_cycle=i)
             self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.ft)(self.model_image, lmn[i,:, 0], lmn[i,:, 1], lmn[i,:, 2], uvw[i,:, 0], uvw[i,:, 1], uvw[i,:, 2]) for i in range(batchsize))
             self.resmean = torch.mean(torch.abs(torch.tensor(residual_vis)))
