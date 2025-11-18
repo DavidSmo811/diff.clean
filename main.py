@@ -3,8 +3,9 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 import wandb as wb
 import os
+import data_loader as dl
 
-from unet_film import UNet
+from unet_film2 import UNet
 from major_loop import reconstruction_loop   # <-- falls in eigener Datei
 # oder falls dein Code oben in reconstruction_loop.py gespeichert wird:
 # from reconstruction_loop import reconstruction_loop
@@ -21,8 +22,8 @@ num_max_major_cycle = 5
 epochs_per_cycle = 200
 learning_rate = 1e-4
 
-batch_size = 1
-num_workers = 0
+batch_size = 5
+
 ###############################################
 
 
@@ -30,38 +31,11 @@ num_workers = 0
 #       YOUR DATASET – PLACEHOLDER
 ###############################################
 
-class MyDataset(torch.utils.data.Dataset):
-    """
-    Erwartet:
-      return x, y
+data_path = dl.get_paths("/hs/babbage/data/shared/visibility_data/", "train")  # Passe den Pfad an
 
-      wobei x = (vis, uvw, lmn)
-            y = ground truth image
-    """
+dataset = dl.VisDataSet(data_path)
+data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    def __init__(self):
-        super().__init__()
-        # TODO: durch echte Daten ersetzen
-        self.N = 10
-
-    def __len__(self):
-        return self.N
-
-    def __getitem__(self, idx):
-        # Dummy shapes – ERSETZEN durch echte Daten
-        vis = torch.zeros(1, 1000, dtype=torch.cfloat)
-        uvw = torch.zeros(1, 1000, 3)
-        lmn = torch.zeros(1, 1000, 3)
-        sky = torch.zeros(1, 512, 512)
-
-        x = (vis, uvw, lmn)
-        y = sky
-        return x, y
-
-
-dataset = MyDataset()
-data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                         num_workers=num_workers)
 ###############################################
 
 
@@ -109,7 +83,7 @@ loop.checkpoint_dir = CHECKPOINT_DIR
 print("Starting major-cycle training loop …")
 
 for _ in loop:
-    # Alle Berechnungen passieren in __next__
+    print("Major cycle step completed.")
     pass
 
 print("Training finished.")

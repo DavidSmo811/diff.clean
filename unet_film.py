@@ -25,10 +25,10 @@ class DoubleConv(nn.Module):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            nn.GroupNorm(num_groups=8, num_channels=out_ch),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            nn.GroupNorm(num_groups=8, num_channels=out_ch),
             nn.ReLU(inplace=True),
         )
 
@@ -137,6 +137,10 @@ class UNet(nn.Module):
 
         self.outc = OutConv(enc_channels[0], out_channels)
 
+        # Output modulation, but without forcing positivity
+        self.output_scale = nn.Parameter(torch.tensor(0.1))   # small output magnitude
+        self.output_bias  = nn.Parameter(torch.tensor(0.01))  # slightly positive start
+
         # Conditioning MLP: map conditioning index -> FiLM parameters (gamma,beta) for each level
         # We'll create one pair (gamma,beta) per feature-channel in each level (including bottleneck and decoder outputs)
         # Collect sizes per location where we'll apply FiLM (after inc, after each down conv, after bottleneck, after each up conv)
@@ -157,6 +161,8 @@ class UNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(hidden, total_film_params)
         )
+        nn.init.constant_(self.film_mlp[-1].weight, 0.0)
+        nn.init.constant_(self.film_mlp[-1].bias, 0.0)
 
         # store film channel layout for easy slicing
         self.film_layout = film_channels
@@ -167,9 +173,12 @@ class UNet(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
                 nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+            # elif isinstance(m, nn.BatchNorm2d):
+            #     nn.init.constant_(m.weight, 1)
+            #     nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.GroupNorm):
+                nn.init.constant_(m.weight, 1.0)  # gamma = 1
+                nn.init.constant_(m.bias, 0.0)    # beta = 0
             elif isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
@@ -203,8 +212,12 @@ class UNet(nn.Module):
             nparams = 2 * c
             chunk = film_params[:, cursor:cursor + nparams]  # (B, 2*c)
             cursor += nparams
-            gamma = chunk[:, :c].unsqueeze(-1).unsqueeze(-1)  # (B, c, 1, 1)
-            beta = chunk[:, c:].unsqueeze(-1).unsqueeze(-1)
+            #gamma = chunk[:, :c].unsqueeze(-1).unsqueeze(-1)  # (B, c, 1, 1)
+            #beta = chunk[:, c:].unsqueeze(-1).unsqueeze(-1)
+            gamma_raw = chunk[:, :c]
+            beta_raw  = chunk[:, c:]
+            gamma = (0.1 * torch.tanh(gamma_raw)).unsqueeze(-1).unsqueeze(-1)
+            beta  = (0.01 * torch.tanh(beta_raw)).unsqueeze(-1).unsqueeze(-1)
             out.append((gamma, beta))
         return out
 
@@ -243,14 +256,19 @@ class UNet(nn.Module):
         x_up = xb
         # first up uses last encoder's skip
         for i, up in enumerate(self.ups):
-            # choose corresponding skip: encs in reverse order
             skip = encs[-1 - i]
             x_up = up(x_up, skip)
-            gamma, beta = films[film_idx]
-            film_idx += 1
-            x_up = x_up * (1.0 + gamma) + beta
+
+            # apply FiLM to all but the LAST up block
+            if i < len(self.ups) - 1:
+                gamma, beta = films[film_idx]
+                film_idx += 1
+                x_up = x_up * (1.0 + gamma) + beta
 
         out = self.outc(x_up)
+        # Soft biasing toward positive but not enforced
+        out = out * self.output_scale + self.output_bias
+
         return out
 
 
