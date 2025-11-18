@@ -14,6 +14,7 @@ class reconstruction_loop:
         self.unet = unet
         self.optimizer = optimizer
         self.finufft = CupyFinufft(image_size=pix_size, fov_arcsec=fov_arcsec, eps=eps)
+        self.pix_size = pix_size
         self.num_max_major_cycle = num_max_major_cycle
         self.model_image = None
         self.model_vis = None
@@ -57,10 +58,12 @@ class reconstruction_loop:
     
 
     def loss_percentile_scheduler(self, ground_truth, start_percentile=99.99, end_percentile=70.0, k=5.0):
-        x = torch.linspace(0, 1, self.num_max_major_cycle)  # linear 0..1
+        x = torch.linspace(0, 1, self.num_max_major_cycle, dtype=ground_truth.dtype).to(self.device)  # linear 0..1
         k = 5.0  # >1 → starkes Anhäufen am Ende
         y = start_percentile + (end_percentile - start_percentile) * (1 - (1 - x)**k)
         y=torch.flip(y, dims=[0])
+        print(ground_truth.dtype)
+        print(y[self.current_cycle].dtype)
         percentile_gt = torch.quantile(torch.abs(ground_truth), y[self.current_cycle] / 100.0)
         filter_image = torch.where(torch.abs(ground_truth) >= percentile_gt, ground_truth, torch.zeros_like(ground_truth))
         return filter_image
@@ -68,6 +71,7 @@ class reconstruction_loop:
     
 
     def minor_cycle_step(self, residual_image, sky_image, train_cycle, logging_step=100):
+        print(self.current_cycle, self.current_epoch)
         if residual_image.dim() == 3:
             residual_image = residual_image.unsqueeze(1)  # (B,1,H,W)
 
@@ -99,18 +103,30 @@ class reconstruction_loop:
                 self.model_image = self.model_image + prediction if self.model_image is not None else prediction
 
     def major_cycle_step(self, data_in):
+        print(f"Starting major cycle {self.current_cycle}, epoch {self.current_epoch} …")
         for x,y in data_in:
-            vis = x[0]
-            uvw = x[1]
-            lmn = x[2]
-        batchsize=int(vis.shape[0])
-        y = y.to(self.device)
-        if self.current_cycle == 0:
-            self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat)
-        for i in range(self.current_cycle+1):
-            residual_vis = vis - self.model_vis
-            residual_image = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.ift)(residual_vis, lmn[i,:, 0], lmn[i,:, 1], lmn[i,:, 2], uvw[i,:, 0], uvw[i,:, 1], uvw[i,:, 2]) for i in range(batchsize))
-            residual_image = torch.tensor(residual_image).to(self.device)
-            self.minor_cycle_step(residual_image, y, train_cycle=i)
-            self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.ft)(self.model_image, lmn[i,:, 0], lmn[i,:, 1], lmn[i,:, 2], uvw[i,:, 0], uvw[i,:, 1], uvw[i,:, 2]) for i in range(batchsize))
-            self.resmean = torch.mean(torch.abs(torch.tensor(residual_vis)))
+            print("Loading vis")
+            vis = x[0].cfloat()
+            print("Loading uvw")
+            uvw = x[1].float()
+            print("Loading lmn")
+            lmn = x[2].float()
+            batchsize=int(vis.shape[0])
+            y = y.to(self.device)
+            if self.current_cycle == 0:
+                self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat)
+            print("Data loaded, starting major cycle steps …")
+            for i in range(self.current_cycle+1):
+                residual_vis = vis - self.model_vis
+                print(residual_vis.dtype)
+                print(residual_vis.shape)
+                print(vis.shape)
+                print(uvw.shape)
+                print(lmn.shape)
+                residual_image = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.inufft)(residual_vis[k], lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :]) for k in range(batchsize))
+                residual_image = torch.tensor(residual_image).to(self.device)
+                residual_image = torch.abs(residual_image.reshape((batchsize, self.pix_size, self.pix_size))).float()
+                print("Starting minor cycle step …")
+                self.minor_cycle_step(residual_image, y, train_cycle=i)
+                self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.nufft)(self.model_image, lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :], return_torch=True) for k in range(batchsize))
+                self.resmean = torch.mean(torch.abs(torch.tensor(residual_vis)))
