@@ -1,0 +1,181 @@
+import warnings
+from functools import partial
+from math import pi
+
+import cufinufft
+import cupy as cp
+import torch
+from operator import itemgetter
+
+
+def cupy_to_torch(x_cp):
+    """CuPy array -> Torch tensor on GPU (Zero-Copy via DLPack)"""
+    return torch.utils.dlpack.from_dlpack(x_cp.toDlpack())
+
+
+def torch_to_cupy(x_torch):
+    """Torch tensor -> CuPy array on GPU (Zero-Copy via DLPack)"""
+    return cp.fromDlpack(torch.utils.dlpack.to_dlpack(x_torch))
+
+
+class CupyFinufft:
+    """Wrapper to use Finufft Type 3d3 for radio interferometry data."""
+
+    def __init__(self, image_size, fov_arcsec, eps=1e-12):
+        self.px_size = ((fov_arcsec / 3600) * pi / 180) / image_size
+        self.px_scaling = image_size**2
+        self.image_size = image_size
+
+        self.ft = partial(cufinufft.nufft3d3, isign=-1, eps=eps)
+        self.ift = partial(cufinufft.nufft3d3, isign=+1, eps=eps)
+
+    #@profile
+    def _compute_visibility_weights_and_indices(
+        self, u_coords, v_coords, w_coords, image_size=None
+    ):
+        if image_size is None:
+            image_size = self.image_size
+
+        # Convert UV coordinates to pixel indices
+        u_pixels = (u_coords / (2 * pi / image_size)).astype(cp.int64)
+        v_pixels = (v_coords / (2 * pi / image_size)).astype(cp.int64)
+
+        # Clip to valid image bounds
+        u_pixels = cp.clip(u_pixels, -image_size // 2, image_size // 2 - 1)
+        v_pixels = cp.clip(v_pixels, -image_size // 2, image_size // 2 - 1)
+
+        # Shift to positive indices (center at image_size // 2)
+        u_pixels = u_pixels + image_size // 2
+        v_pixels = v_pixels + image_size // 2
+
+        # Ensure indices are within bounds
+        valid_mask = (
+            (u_pixels >= 0)
+            & (u_pixels < image_size)
+            & (v_pixels >= 0)
+            & (v_pixels < image_size)
+        )
+
+        # Convert 2D indices to 1D for bincount
+        linear_indices = v_pixels * image_size + u_pixels
+
+        # Compute histogram of all visibilities
+        histogram_flat = cp.bincount(
+            linear_indices, minlength=image_size * image_size
+        ).astype(cp.float64)
+
+        # Map each visibility to its bin count
+        visibility_weights = histogram_flat[linear_indices]
+
+        # Handle invalid entries (outside bounds)
+        visibility_weights[~valid_mask] = 1.0
+
+        return visibility_weights
+
+    #@profile
+    def nufft(
+        self,
+        sky_values,
+        l_coords,
+        m_coords,
+        n_coords,
+        u_coords,
+        v_coords,
+        w_coords,
+        return_torch=False,
+    ):
+        # Sky coordinates (Image domain - lmn coordinates)
+        source_l = torch_to_cupy(l_coords.double() / self.px_size).astype(cp.float64)
+        source_m = torch_to_cupy(m_coords.double() / self.px_size).astype(cp.float64)
+        source_n = torch_to_cupy((n_coords.double() - 1) / self.px_size).astype(cp.float64)
+
+        # Antenna coordinates (Fourier Domain - uvw coordinates)
+        target_u = torch_to_cupy(2 * pi * (u_coords.flatten().double() * self.px_size)).astype(cp.float64)
+        target_v = torch_to_cupy(2 * pi * (v_coords.flatten().double() * self.px_size)).astype(cp.float64)
+        target_w = torch_to_cupy(2 * pi * (w_coords.flatten().double() * self.px_size)).astype(cp.float64)
+        
+
+        outside_bounds = cp.array(
+            [
+                (target_u <= -pi) | (target_u > pi),
+                (target_v <= -pi) | (target_v > pi),
+                (target_w <= -pi) | (target_w > pi),
+            ]
+        )
+        coord_outside = cp.where(cp.any(outside_bounds, axis=1))[0]
+        uvw_map = {0: "u", 1: "v", 2: "w"}
+        if outside_bounds.any():
+            warnings.warn(
+                f"Some of the {', '.join(itemgetter(*coord_outside)(uvw_map))} coordinates "
+                "lie outside the constructed image. This can lead to cufinufft errors."
+            )
+
+        # Values at source position (Source intensities)
+        c_values = torch_to_cupy(sky_values.flatten().to(torch.complex128))
+
+        result = self.ft(source_l, source_m, source_n, c_values, target_u, target_v, target_w)
+
+        if return_torch:
+            visibilities = cupy_to_torch(result)
+        else:
+            visibilities = result  # bleibt auf GPU als CuPy Array
+
+        return visibilities
+
+    #@profile
+    def inufft(
+        self,
+        visibilities,
+        l_coords,
+        m_coords,
+        n_coords,
+        u_coords,
+        v_coords,
+        w_coords,
+        return_torch=False,
+    ):
+        # Antenna coordinates (Fourier Domain - uvw coordinates)
+        source_u = torch_to_cupy(2 * pi * (u_coords.flatten() * self.px_size)).astype(cp.float64)
+        source_v = torch_to_cupy(2 * pi * (v_coords.flatten() * self.px_size)).astype(cp.float64)
+        source_w = torch_to_cupy(2 * pi * (w_coords.flatten() * self.px_size)).astype(cp.float64)
+
+        # Compute visibility weights
+        visibility_weights = self._compute_visibility_weights_and_indices(
+            source_u, source_v, source_w, image_size=self.image_size
+        )
+
+        outside_bounds = cp.array(
+            [
+                (source_u <= -pi) | (source_u > pi),
+                (source_v <= -pi) | (source_v > pi),
+                (source_w <= -pi) | (source_w > pi),
+            ]
+        )
+        coord_outside = cp.where(cp.any(outside_bounds, axis=1))[0]
+        uvw_map = {0: "u", 1: "v", 2: "w"}
+        if outside_bounds.any():
+            warnings.warn(
+                f"Some of the {', '.join(itemgetter(*coord_outside)(uvw_map))} coordinates "
+                "lie outside the constructed image. This can lead to cufinufft errors."
+            )
+
+        # Fourier coeficients at antenna positions (Visibilities)
+        c_values = torch_to_cupy(visibilities.flatten().to(torch.complex128))
+
+        # Normalize visibility values by dividing by their bin counts
+        c_values_normalized = c_values / visibility_weights
+
+        # Sky coordinates (Image domain - lmn coordinates)
+        target_l = torch_to_cupy(l_coords / self.px_size).astype(cp.float64)
+        target_m = torch_to_cupy(m_coords / self.px_size).astype(cp.float64)
+        target_n = torch_to_cupy((n_coords - 1) / self.px_size).astype(cp.float64)
+
+        result = self.ift(source_u, source_v, source_w, c_values_normalized, target_l, target_m, target_n)
+        result /= self.px_scaling
+
+        if return_torch:
+            sky_intensities = cupy_to_torch(result)
+        else:
+            sky_intensities = result  # bleibt auf GPU als CuPy Array
+
+        return sky_intensities

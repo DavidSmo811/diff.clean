@@ -24,7 +24,7 @@ class CupyFinufft:
 
         self.ft = partial(cufinufft.nufft3d3, isign=-1, eps=eps)
         self.ift = partial(cufinufft.nufft3d3, isign=+1, eps=eps)
-
+    @profile
     def _compute_visibility_weights_and_indices(
         self,
         u_coords,
@@ -96,7 +96,7 @@ class CupyFinufft:
         visibility_weights[~valid_mask] = 1.0
 
         return visibility_weights
-
+    @profile
     def nufft(
         self,
         sky_values,
@@ -168,7 +168,7 @@ class CupyFinufft:
             visibilities = result.get()
 
         return visibilities
-
+    @profile
     def inufft(
         self,
         visibilities,

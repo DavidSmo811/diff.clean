@@ -49,3 +49,36 @@ class VisDataSet(Dataset):
 #    print(vis.shape, uvw.shape, lmn.shape, y.shape)
 #    print(uvw[0,0,:5])
 
+
+class BufferedVisDataSet(torch.utils.data.Dataset):
+    def __init__(self, all_paths, preload_size=500):
+        self.all_paths = all_paths
+        self.preload_size = preload_size
+        self.buffer = []
+        self.start_index = 0
+        self._load_buffer()
+
+    def _load_buffer(self):
+        print(f"Loading next {self.preload_size} samples into RAM...")
+        self.buffer = []
+
+        for p in self.all_paths[self.start_index : self.start_index + self.preload_size]:
+            with h5py.File(p, "r") as f:
+                vis = torch.from_numpy(np.array(f["vis_full"]))
+                uvw = torch.from_numpy(np.array(f["uvw_full"]))
+                lmn = torch.from_numpy(np.array(f["lmn"]))
+                sky = torch.from_numpy(np.array(f["sky"]))
+            self.buffer.append(([vis, uvw, lmn], sky))
+
+        self.start_index += self.preload_size
+
+    def __len__(self):
+        return len(self.buffer)
+
+    def refill(self):
+        """Call this when the buffer is exhausted."""
+        if self.start_index < len(self.all_paths):
+            self._load_buffer()
+
+    def __getitem__(self, idx):
+        return self.buffer[idx]
