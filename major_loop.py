@@ -116,6 +116,12 @@ class reconstruction_loop:
         print(f"In __next__: Cycle {self.current_cycle}, Epoch {self.current_epoch}")
         self.current_epoch += 1
         self.model_image = None
+        if self.current_epoch >= self.epochs:
+            print(f"  → Major Cycle {self.current_cycle} completed")
+            self.save_checkpoint(f"unet_cycle_{self.current_cycle}.pt")
+            self.current_cycle += 1
+            self.current_epoch = 0
+            self.model_image = None
         
         # Abbruchbedingungen prüfen
         if self.current_cycle >= self.num_max_major_cycle:
@@ -156,13 +162,13 @@ class reconstruction_loop:
                 print(f"  → Resetting model_image after first epoch")
                 self.model_image = None
             
-            # Prüfen, ob Major Cycle fertig ist
-            if self.current_epoch >= self.epochs:
-                print(f"  → Major Cycle {self.current_cycle} completed")
-                self.save_checkpoint(f"unet_cycle_{self.current_cycle}.pt")
-                self.current_cycle += 1
-                self.current_epoch = 0
-                self.model_image = None
+        # Prüfen, ob Major Cycle fertig ist
+        if self.current_epoch >= self.epochs:
+            print(f"  → Major Cycle {self.current_cycle} completed")
+            self.save_checkpoint(f"unet_cycle_{self.current_cycle}.pt")
+            self.current_cycle += 1
+            self.current_epoch = 0
+            self.model_image = None
             
             # Rekursiv nächsten Batch holen (neue Epoch startet)
             return self.__next__()
@@ -231,10 +237,10 @@ class reconstruction_loop:
         y=y[:,0,:,:]+y[:,1,:,:]
         y = y.to(self.device)
         if self.current_cycle == 0:
-            self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat)
+            self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat, device=self.device)
         print("Data loaded, starting major cycle steps …")
         for i in range(self.current_cycle+1):
-            residual_vis = vis - self.model_vis
+            residual_vis = vis.clone().to(self.device) - self.model_vis
             print(residual_vis.dtype)
             print(residual_vis.shape)
             print(vis.shape)
@@ -245,6 +251,7 @@ class reconstruction_loop:
             residual_image = torch.abs(residual_image.reshape((batchsize, self.pix_size, self.pix_size))).float()
             print("Starting minor cycle step …")
             self.minor_cycle_step(residual_image, y, train_cycle=i)
-            self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.nufft)(self.model_image.detach().clone()[k], lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :], return_torch=True) for k in range(batchsize))
+            self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.nufft)(self.model_image.detach().clone()[k], lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :]) for k in range(batchsize))
+            self.model_vis = torch.tensor(np.array(self.model_vis), device=self.device)
             self.resmean = torch.mean(torch.abs(torch.tensor(residual_vis)))
         return self.resmean
