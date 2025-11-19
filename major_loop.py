@@ -236,10 +236,12 @@ class reconstruction_loop:
         batchsize=int(vis.shape[0])
         y=y[:,0,:,:]+y[:,1,:,:]
         y = y.to(self.device)
-        if self.current_cycle == 0:
-            self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat, device=self.device)
+        #if self.current_cycle == 0:
+        #    self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat, device=self.device)
         print("Data loaded, starting major cycle steps …")
         for i in range(self.current_cycle+1):
+            if i ==0:
+                self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat, device=self.device)
             residual_vis = vis.clone().to(self.device) - self.model_vis
             print(residual_vis.dtype)
             print(residual_vis.shape)
