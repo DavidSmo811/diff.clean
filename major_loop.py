@@ -32,9 +32,9 @@ def wandb_powernorm_image(array, caption="", gamma=0.5, cmap="viridis"):
 
 
 class reconstruction_loop:
-    def __init__(self, data_loader, data_set, unet, optimizer,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=6000, eps=1e-6, max_resmean=1e-3, device=None):
+    def __init__(self, data_loader, unet, optimizer,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=6000, eps=1e-6, max_resmean=1e-3, device=None):
         self.dataloader = data_loader
-        self.dataset = data_set
+        #self.dataset = data_set
         self.unet = unet
         self.optimizer = optimizer
         self.finufft = CupyFinufft(image_size=pix_size, fov_arcsec=fov_arcsec, eps=eps)
@@ -185,7 +185,7 @@ class reconstruction_loop:
         print("Alle Percentile",y)
         print("Percentil",y[self.current_cycle])
         percentile_gt = torch.quantile(torch.abs(ground_truth), y[self.current_cycle] / 100.0)
-        filter_image = torch.where(torch.abs(ground_truth) >= percentile_gt, ground_truth, torch.zeros_like(ground_truth))
+        filter_image = torch.where(torch.abs(ground_truth) >= percentile_gt, ground_truth, 1e-6*torch.ones_like(ground_truth))
         return filter_image
 
     
@@ -210,11 +210,11 @@ class reconstruction_loop:
             input_image = residual_image.detach()/torch.max(torch.abs(residual_image.detach()))
             prediction = self.unet(input_image, conditioning=train_cycle)
             prediction = prediction * torch.max(torch.abs(residual_image.detach()))
-            self.model_image = torch.abs(self.model_image.detach() + prediction) if self.model_image is not None else prediction
-            loss = nn.HuberLoss()(self.model_image, loss_image)/nn.HuberLoss()(self.dirty_image, loss_image)
+            self.model_image = torch.abs(self.model_image.detach() + prediction if self.model_image is not None else prediction)
+            loss = nn.HuberLoss()(torch.log(torch.abs(self.model_image)+1e-7), torch.log(torch.abs(loss_image)))/nn.HuberLoss()(torch.log(torch.abs(self.dirty_image)+1e-7), torch.log(torch.abs(loss_image)))
             loss.backward()
             self.optimizer.step()
-            wb.log({"minor_cycle_loss": loss.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
+            wb.log({f"minor_cycle_loss {self.current_cycle}": loss.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             #if self.current_epoch % logging_step == 0:
             wb.log({"residual image": wandb_powernorm_image(residual_image[0,0].cpu().detach().numpy(), caption="Residual Image"), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             wb.log({"model image": wandb_powernorm_image(self.model_image[0,0].cpu().detach().numpy(), caption="Model Image"), "major_cycle": self.current_cycle, "epoch": self.current_epoch})

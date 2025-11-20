@@ -3,7 +3,7 @@ import torch
 import numpy as np 
 import h5py
 from pathlib import Path
-
+import webdataset as wds
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -82,3 +82,75 @@ class BufferedVisDataSet(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         return self.buffer[idx]
+    
+
+
+
+# def make_webdataset_dataloader(
+#     shards_pattern, 
+#     batch_size=4,
+#     shuffle=1,
+#     num_workers=4,
+# ):
+#     """
+#     Returns a PyTorch DataLoader that yields batches of:
+#         (vis, uvw, lmn), sky
+#     """
+
+#     # WebDataset pipeline
+#     dataset = (
+#         wds.WebDataset(shards_pattern, shardshuffle=True)
+#         .shuffle(shuffle)
+#         .decode()  
+#         .to_tuple("vis.npy", "uvw.npy", "lmn.npy", "sky.npy")
+#         .map(lambda x: (
+#             (torch.from_numpy(x[0]),
+#              torch.from_numpy(x[1]),
+#              torch.from_numpy(x[2])),
+#             torch.from_numpy(x[3]),
+#         ))
+#         .batched(batch_size, partial=False)
+#     )
+
+#     # PyTorch DataLoader wrapper
+#     loader = DataLoader(
+#         dataset,
+#         batch_size=None,   # <--- important! batches already created by dataset
+#         num_workers=num_workers,
+#     )
+
+#     return loader
+def make_webdataset_dataloader(
+    shards_pattern,
+    batch_size=4,
+    shuffle=1,
+    num_workers=4,
+):
+    dataset = (
+        wds.WebDataset(shards_pattern, shardshuffle=shuffle)
+        .shuffle(shuffle)
+        .decode("torch")
+        .to_tuple("vis.npy", "uvw.npy", "lmn.npy", "sky.npy")
+        .map(lambda x: (
+            (torch.from_numpy(x[0]) if isinstance(x[0], np.ndarray) else x[0],
+             torch.from_numpy(x[1]) if isinstance(x[1], np.ndarray) else x[1],
+             torch.from_numpy(x[2]) if isinstance(x[2], np.ndarray) else x[2]),
+            torch.from_numpy(x[3]) if isinstance(x[3], np.ndarray) else x[3]
+        ))
+    )
+
+    # Verwende PyTorch's eigenen DataLoader mit collate_fn
+    def collate_fn(batch):
+        vis = torch.stack([x[0][0] for x in batch])
+        uvw = torch.stack([x[0][1] for x in batch])
+        lmn = torch.stack([x[0][2] for x in batch])
+        sky = torch.stack([x[1] for x in batch])
+        return (vis, uvw, lmn), sky
+
+    loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+    )
+    return loader
