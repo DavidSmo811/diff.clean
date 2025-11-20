@@ -185,7 +185,7 @@ class reconstruction_loop:
         print("Alle Percentile",y)
         print("Percentil",y[self.current_cycle])
         percentile_gt = torch.quantile(torch.abs(ground_truth), y[self.current_cycle] / 100.0)
-        filter_image = torch.where(torch.abs(ground_truth) >= percentile_gt, ground_truth, 1e-6*torch.ones_like(ground_truth))
+        filter_image = torch.where(torch.abs(ground_truth) >= percentile_gt, ground_truth, torch.zeros_like(ground_truth))
         return filter_image
 
     
@@ -201,7 +201,7 @@ class reconstruction_loop:
             sky_image = sky_image.unsqueeze(1)
             print("Nachher",sky_image.shape)
 
-        train = train_cycle==self.current_cycle
+        train = True #train_cycle==self.current_cycle
         if train:
             loss_image=self.loss_percentile_scheduler(sky_image)
             loss_image=loss_image.float()
@@ -211,10 +211,13 @@ class reconstruction_loop:
             prediction = self.unet(input_image, conditioning=train_cycle)
             prediction = prediction * torch.max(torch.abs(residual_image.detach()))
             self.model_image = torch.abs(self.model_image.detach() + prediction if self.model_image is not None else prediction)
-            loss = nn.HuberLoss()(torch.log(torch.abs(self.model_image)+1e-7), torch.log(torch.abs(loss_image)))/nn.HuberLoss()(torch.log(torch.abs(self.dirty_image)+1e-7), torch.log(torch.abs(loss_image)))
+            loss1 = nn.HuberLoss()(torch.log(torch.abs(self.model_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))/nn.HuberLoss()(torch.log(torch.abs(self.dirty_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))
+            mask = (loss_image != 0).float()
+            loss2 = nn.HuberLoss()(self.model_image*mask, loss_image)/nn.HuberLoss()(self.dirty_image*mask, loss_image)
+            loss = 0.7*loss1 + 0.3*loss2
             loss.backward()
             self.optimizer.step()
-            wb.log({f"minor_cycle_loss {self.current_cycle}": loss.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
+            wb.log({f"minor_cycle_loss {train_cycle}": loss.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             #if self.current_epoch % logging_step == 0:
             wb.log({"residual image": wandb_powernorm_image(residual_image[0,0].cpu().detach().numpy(), caption="Residual Image"), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             wb.log({"model image": wandb_powernorm_image(self.model_image[0,0].cpu().detach().numpy(), caption="Model Image"), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
