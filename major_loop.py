@@ -1,3 +1,20 @@
+import subprocess
+
+def get_least_used_gpu():
+    output = subprocess.check_output(
+        "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits",
+        shell=True
+    )
+    mem_usage = [int(x) for x in output.decode().strip().split("\n")]
+    return min(range(len(mem_usage)), key=lambda i: mem_usage[i])
+
+gpu_id = get_least_used_gpu()
+print(f"Selected GPU: {gpu_id}")
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
@@ -10,8 +27,21 @@ from finufft_dlpack import CupyFinufft
 import matplotlib.pyplot as plt
 from matplotlib.colors import PowerNorm
 import io
-import io
+import subprocess
 from PIL import Image
+
+# def get_least_used_gpu():
+#     """Returns the index of the least memory-used GPU."""
+#     try:
+#         result = subprocess.check_output(
+#             "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits",
+#             shell=True
+#         )
+#         gpu_mem = [int(x) for x in result.decode("utf-8").strip().split("\n")]
+#         return int(torch.argmin(torch.tensor(gpu_mem)))
+#     except Exception as e:
+#         print("Could not determine free GPU, defaulting to cuda:0. Error:", e)
+#         return 0
 
 def wandb_powernorm_image(array, caption="", gamma=0.5, cmap="viridis"):
     fig, ax = plt.subplots(figsize=(5, 4), dpi=150)
@@ -49,6 +79,15 @@ class reconstruction_loop:
         self.current_cycle = 0
 
         self.device = device if device is not None else (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+        # if device is not None:
+        #     self.device = device
+        # else:
+        #     if torch.cuda.is_available():
+        #         gpu_id = get_least_used_gpu()
+        #         self.device = torch.device(f"cuda:{gpu_id}")
+        #         print(f"Using GPU {gpu_id} (least memory used)")
+        #     else:
+        #         self.device = torch.device("cpu")
         self.unet.to(self.device)
 
         self.data_iter = None
@@ -176,7 +215,7 @@ class reconstruction_loop:
             return self.__next__()
 
     #@profile
-    def loss_percentile_scheduler(self, ground_truth, start_percentile=99.95, end_percentile=70.0, k=5.0):
+    def loss_percentile_scheduler(self, ground_truth, start_percentile=99.95, end_percentile=70.0, k=5.0, softness=0.1):
         x = torch.linspace(0, 1, self.num_max_major_cycle, dtype=ground_truth.dtype).to(self.device)  # linear 0..1
         k = 5.0  # >1 → starkes Anhäufen am Ende
         y = start_percentile + (end_percentile - start_percentile) * ((1 - x)**k)
@@ -185,7 +224,12 @@ class reconstruction_loop:
         print("Alle Percentile",y)
         print("Percentil",y[self.current_cycle])
         percentile_gt = torch.quantile(torch.abs(ground_truth), y[self.current_cycle] / 100.0)
-        filter_image = torch.where(torch.abs(ground_truth) >= percentile_gt, ground_truth, torch.zeros_like(ground_truth))
+        #filter_image = torch.where(torch.abs(ground_truth) >= percentile_gt, ground_truth, torch.zeros_like(ground_truth))
+
+        mask = torch.sigmoid((ground_truth - percentile_gt) / (softness * percentile_gt))
+
+        filter_image = mask * ground_truth
+
         return filter_image
 
     
@@ -194,6 +238,9 @@ class reconstruction_loop:
         print(self.current_cycle, self.current_epoch)
         if residual_image.dim() == 3:
             residual_image = residual_image.unsqueeze(1)  # (B,1,H,W)
+
+        if self.model_image.dim() == 3:
+            self.model_image = self.model_image.unsqueeze(1)  # (B,1,H,W)
 
         print("Vorher",sky_image.shape)
         if sky_image.dim() == 3:
@@ -207,10 +254,19 @@ class reconstruction_loop:
             loss_image=loss_image.float()
             self.unet.train()
             self.optimizer.zero_grad()
-            input_image = residual_image.detach()/torch.max(torch.abs(residual_image.detach()))
+            input_image = torch.cat([residual_image.detach(), self.model_image.detach()], dim=1)
+            print("Input image shape:", input_image.shape)
+            print("Self.model_image shape:", self.model_image.shape)
+            input_image = input_image/torch.max(self.dirty_image.detach())#residual_image.detach()/torch.max(torch.abs(self.dirty_image.detach()))
             prediction = self.unet(input_image, conditioning=train_cycle)
-            prediction = prediction * torch.max(torch.abs(residual_image.detach()))
+            prediction = prediction * torch.max(torch.abs(self.dirty_image.detach()))
+            print("Prediction shape:", prediction.shape)
+
+            #Because the network now also receives the model image as input, the network can correct its previous prediction and we can take the absolute value here
+            prediction = torch.abs(prediction)
+
             self.model_image = torch.abs(self.model_image.detach() + prediction if self.model_image is not None else prediction)
+            print("Model image shape:", self.model_image.shape)
             loss1 = nn.HuberLoss()(torch.log(torch.abs(self.model_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))/nn.HuberLoss()(torch.log(torch.abs(self.dirty_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))
             mask = (loss_image != 0).float()
             loss2 = nn.HuberLoss()(self.model_image*mask, loss_image)/nn.HuberLoss()(self.dirty_image*mask, loss_image)
@@ -262,6 +318,7 @@ class reconstruction_loop:
             residual_image = torch.abs(residual_image.reshape((batchsize, self.pix_size, self.pix_size))).float()
             if i == 0:
                 self.dirty_image = residual_image.clone()
+                self.model_image = torch.zeros_like(residual_image, device=self.device).float()
             print("Starting minor cycle step …")
             self.minor_cycle_step(residual_image, y, train_cycle=i)
             self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.nufft)(self.model_image.detach().clone()[k], lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :], return_torch=True) for k in range(batchsize))
