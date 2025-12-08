@@ -62,11 +62,12 @@ def wandb_powernorm_image(array, caption="", gamma=0.5, cmap="viridis"):
 
 
 class reconstruction_loop:
-    def __init__(self, data_loader, unet, optimizer,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=6000, eps=1e-6, max_resmean=1e-3, device=None):
+    def __init__(self, data_loader, unet, optimizer, optimizer_major ,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=6000, eps=1e-6, max_resmean=1e-3, device=None):
         self.dataloader = data_loader
         #self.dataset = data_set
         self.unet = unet
         self.optimizer = optimizer
+        self.optimizer_major = optimizer_major
         self.finufft = CupyFinufft(image_size=pix_size, fov_arcsec=fov_arcsec, eps=eps)
         self.pix_size = pix_size
         self.num_max_major_cycle = num_max_major_cycle
@@ -250,27 +251,29 @@ class reconstruction_loop:
 
         train = True #train_cycle==self.current_cycle
         if train:
-            loss_image=self.loss_percentile_scheduler(sky_image)
+            loss_image=sky_image # self.loss_percentile_scheduler(sky_image)
             loss_image=loss_image.float()
             self.unet.train()
             self.optimizer.zero_grad()
             input_image = torch.cat([residual_image.detach(), self.model_image.detach()], dim=1)
             print("Input image shape:", input_image.shape)
             print("Self.model_image shape:", self.model_image.shape)
-            input_image = input_image/torch.max(self.dirty_image.detach())#residual_image.detach()/torch.max(torch.abs(self.dirty_image.detach()))
+            input_image = input_image/torch.max(torch.abs(self.dirty_image)).detach()#residual_image.detach()/torch.max(torch.abs(self.dirty_image.detach()))
             prediction = self.unet(input_image, conditioning=train_cycle)
-            prediction = prediction * torch.max(torch.abs(self.dirty_image.detach()))
+            prediction = prediction * torch.max(torch.abs(self.dirty_image)).detach()
             print("Prediction shape:", prediction.shape)
 
             #Because the network now also receives the model image as input, the network can correct its previous prediction and we can take the absolute value here
             prediction = torch.abs(prediction)
 
-            self.model_image = torch.abs(self.model_image.detach() + prediction if self.model_image is not None else prediction)
+            self.model_image = prediction #torch.abs(self.model_image.detach() + prediction if self.model_image is not None else prediction)
+            #Vielleicht doch einfach self.model_image = prediction nehmen? Dann kann das Netzwerk Fehler korrigieren!
             print("Model image shape:", self.model_image.shape)
             loss1 = nn.HuberLoss()(torch.log(torch.abs(self.model_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))/nn.HuberLoss()(torch.log(torch.abs(self.dirty_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))
-            mask = (loss_image != 0).float()
-            loss2 = nn.HuberLoss()(self.model_image*mask, loss_image)/nn.HuberLoss()(self.dirty_image*mask, loss_image)
-            loss = 0.7*loss1 + 0.3*loss2
+            percentile_gt = torch.quantile(torch.abs(loss_image), 99.95 / 100.0)
+            mask = torch.where(torch.abs(loss_image) >= percentile_gt, 1, torch.zeros_like(loss_image))#(loss_image != 0).float()
+            loss2 = nn.L1Loss()(self.model_image*mask, loss_image*mask)/nn.L1Loss()(self.dirty_image*mask, loss_image*mask)
+            loss = 0.3*loss1 + 0.7*loss2
             loss.backward()
             self.optimizer.step()
             wb.log({f"minor_cycle_loss {train_cycle}": loss.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
@@ -315,10 +318,18 @@ class reconstruction_loop:
             print(lmn.shape)
             residual_image = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.inufft)(residual_vis[k], lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :], return_torch=True) for k in range(batchsize))
             residual_image = torch.stack(residual_image, dim=0).to(self.device)#torch.tensor(residual_image).to(self.device)
-            residual_image = torch.abs(residual_image.reshape((batchsize, self.pix_size, self.pix_size))).float()
+            residual_image = residual_image.reshape((batchsize, self.pix_size, self.pix_size)).float()
+            #residual_image = torch.abs(residual_image.reshape((batchsize, self.pix_size, self.pix_size))).float()
             if i == 0:
                 self.dirty_image = residual_image.clone()
                 self.model_image = torch.zeros_like(residual_image, device=self.device).float()
+            if i !=0:
+                residual_image.requires_grad_()
+                loss_residual=torch.mean(torch.abs(residual_image))/torch.max(torch.abs(self.dirty_image))
+                self.optimizer_major.zero_grad()
+                loss_residual.backward()
+                self.optimizer_major.step()
+                wb.log({f"Major Loop Loss {i}": loss_residual.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             print("Starting minor cycle step …")
             self.minor_cycle_step(residual_image, y, train_cycle=i)
             self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.nufft)(self.model_image.detach().clone()[k], lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :], return_torch=True) for k in range(batchsize))

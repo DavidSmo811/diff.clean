@@ -93,8 +93,8 @@ class UNet(nn.Module):
         self.condition_proj = nn.Linear(16, sum(self.film_layout))
 
         # Output leicht positiv
-        self.output_scale = nn.Parameter(torch.tensor(0.005))
-        self.output_bias = nn.Parameter(torch.tensor(0.001))
+        self.output_scale = nn.Parameter(torch.tensor(1e-2))#0.005
+        self.output_bias = nn.Parameter(torch.tensor(0.001))#0.001
 
         self._init_weights()
 
