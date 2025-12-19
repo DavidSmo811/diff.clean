@@ -30,6 +30,8 @@ import io
 import subprocess
 from PIL import Image
 
+import loss as ls
+
 # def get_least_used_gpu():
 #     """Returns the index of the least memory-used GPU."""
 #     try:
@@ -90,7 +92,7 @@ class reconstruction_loop:
         #     else:
         #         self.device = torch.device("cpu")
         self.unet.to(self.device)
-
+        self.loss_fn = ls.AdaptiveRadioReconstructionLoss(device=self.device)
         self.data_iter = None
         self.batch_count = 0
 
@@ -269,11 +271,12 @@ class reconstruction_loop:
             self.model_image = prediction #torch.abs(self.model_image.detach() + prediction if self.model_image is not None else prediction)
             #Vielleicht doch einfach self.model_image = prediction nehmen? Dann kann das Netzwerk Fehler korrigieren!
             print("Model image shape:", self.model_image.shape)
-            loss1 = nn.HuberLoss()(torch.log(torch.abs(self.model_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))/nn.HuberLoss()(torch.log(torch.abs(self.dirty_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))
-            percentile_gt = torch.quantile(torch.abs(loss_image), 99.95 / 100.0)
-            mask = torch.where(torch.abs(loss_image) >= percentile_gt, 1, torch.zeros_like(loss_image))#(loss_image != 0).float()
-            loss2 = nn.L1Loss()(self.model_image*mask, loss_image*mask)/nn.L1Loss()(self.dirty_image*mask, loss_image*mask)
-            loss = 0.3*loss1 + 0.7*loss2
+            #loss1 = nn.HuberLoss()(torch.log(torch.abs(self.model_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))/nn.HuberLoss()(torch.log(torch.abs(self.dirty_image)+1e-7), torch.log(torch.abs(loss_image)+1e-7))
+            #percentile_gt = torch.quantile(torch.abs(loss_image), 99.95 / 100.0)
+            #mask = torch.where(torch.abs(loss_image) >= percentile_gt, 1, torch.zeros_like(loss_image))#(loss_image != 0).float()
+            #loss2 = nn.L1Loss()(self.model_image*mask, loss_image*mask)/nn.L1Loss()(self.dirty_image*mask, loss_image*mask)
+            #loss = 0.3*loss1 + 0.7*loss2
+            loss, loss_dict = self.loss_fn(pred=self.model_image, target=loss_image, dirty=self.dirty_image, epoch=train_cycle, total_epochs=self.num_max_major_cycle)
             loss.backward()
             self.optimizer.step()
             wb.log({f"minor_cycle_loss {train_cycle}": loss.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
@@ -283,6 +286,19 @@ class reconstruction_loop:
             wb.log({"prediction": wandb_powernorm_image(prediction[0,0].cpu().detach().numpy(), caption="Prediction"), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             wb.log({"sky image": wandb_powernorm_image(sky_image[0,0].cpu().detach().numpy(), caption="Sky Image"), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             wb.log({"loss image": wandb_powernorm_image(loss_image[0,0].cpu().detach().numpy(), caption="Loss Image"), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
+
+            wb.log({
+            f"loss/total_{train_cycle}": loss_dict['total'],
+            f"loss/hierarchical_{train_cycle}": loss_dict['hierarchical'],
+            f"loss/gradient_{train_cycle}": loss_dict['gradient'],
+            f"loss/flux_{train_cycle}": loss_dict['flux'],
+            f"loss/residual_{train_cycle}": loss_dict['residual'],
+            f"stats/n_bright_pixels": loss_dict['n_bright_pixels'],
+            f"stats/n_mid_pixels": loss_dict['n_mid_pixels'],
+            f"stats/n_faint_pixels": loss_dict['n_faint_pixels'],
+            "major_cycle": self.current_cycle,
+            "epoch": self.current_epoch
+            })
 
         else:
             self.unet.eval()
@@ -323,13 +339,13 @@ class reconstruction_loop:
             if i == 0:
                 self.dirty_image = residual_image.clone()
                 self.model_image = torch.zeros_like(residual_image, device=self.device).float()
-            if i !=0:
-                residual_image.requires_grad_()
-                loss_residual=torch.mean(torch.abs(residual_image))/torch.max(torch.abs(self.dirty_image))
-                self.optimizer_major.zero_grad()
-                loss_residual.backward()
-                self.optimizer_major.step()
-                wb.log({f"Major Loop Loss {i}": loss_residual.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
+            #if i !=0:
+                #residual_image.requires_grad_()
+                #loss_residual=torch.mean(torch.abs(residual_image))/torch.max(torch.abs(self.dirty_image))
+                #self.optimizer_major.zero_grad()
+                #loss_residual.backward()
+                #self.optimizer_major.step()
+                #wb.log({f"Major Loop Loss {i}": loss_residual.item(), "major_cycle": self.current_cycle, "epoch": self.current_epoch})
             print("Starting minor cycle step …")
             self.minor_cycle_step(residual_image, y, train_cycle=i)
             self.model_vis = Parallel(n_jobs=batchsize, backend='threading', prefer='threads')(delayed(self.finufft.nufft)(self.model_image.detach().clone()[k], lmn[k, 0, :], lmn[k, 1, :], lmn[k, 2, :], uvw[k, 0, :], uvw[k, 1, :], uvw[k, 2, :], return_torch=True) for k in range(batchsize))
