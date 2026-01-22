@@ -28,20 +28,26 @@ from astropy.wcs import WCS
 import argparse
 
 
-def read_ms(msname, device="cpu"):
+def read_ms(msname, field_id=0, device="cpu"):
     tab = table(msname, readonly=True)
+
+    field_id_np = tab.getcol("FIELD_ID")
+    sel = (field_id_np == field_id)
+
+    if not np.any(sel):
+        raise ValueError(f"No rows found for FIELD_ID={field_id}")
 
     # ---------- CPU: MS I/O ----------
     try:
-        vis_np  = tab.getcol("CORRECTED_DATA")   # (nrow, nchan, ncorr)
+        vis_np  = tab.getcol("CORRECTED_DATA")[sel]   # (nrow, nchan, ncorr)
     except Exception:
-        vis_np  = tab.getcol("DATA")             # (nrow, nchan, ncorr)
+        vis_np  = tab.getcol("DATA")[sel]             # (nrow, nchan, ncorr)
         print("No CORRECTED_DATA found; using DATA instead.")
-    flag_np = tab.getcol("FLAG")
-    uvw_m   = tab.getcol("UVW")
+    flag_np = tab.getcol("FLAG")[sel]
+    uvw_m   = tab.getcol("UVW")[sel]
 
     try:
-        weights_np = tab.getcol("WEIGHT_SPECTRUM")
+        weights_np = tab.getcol("WEIGHT_SPECTRUM")[sel]
         weights_np = np.reshape(weights_np, vis_np.shape)
         use_weights = True
         print("Using WEIGHT_SPECTRUM for averaging.")
@@ -243,6 +249,7 @@ if __name__ == "__main__":
     VIS_SCALE=config["vis_scale"]#800
     CHECKPOINT_PATH = config["checkpoint_path"]#"/hs/babbage/data/group-brueggen/David/diff.clean_save/unet_reconstruction_new_combined_loss_new_scaler_maj7/unet_final_cycle_7.pt" #unet_reconstruction_LogHuber_Sky_image_is_loss_two_opt_loss_with_masking_res_no_abs/unet_final_cycle_5.pt"#"/hs/babbage/data/group-brueggen/David/diff.clean_save/unet_final_cycle_5.pt"
     NPZ_NAME = config["npz_name"]#"/hs/babbage/data/group-brueggen/David/preprocessed_Angelina_dataset.npz"
+    FIELD_ID = config.get("field_id", 0)
     if NPZ_NAME is not None:
         NPZ_PATH=f"{SAVE_PATH}/{OBJ_NAME}/{NPZ_NAME}.npz"
     unet = UNet(
@@ -275,6 +282,7 @@ if __name__ == "__main__":
         npz_name=NPZ_PATH,
         )
     model_image = result["model_image"][0,0].detach().cpu()
+    residual_images = np.stack(result["res_image"], axis=0)#result["res_image"][:][0,...].detach().cpu()
     #save as fits
     header = wcs.to_header()
 
@@ -288,6 +296,35 @@ if __name__ == "__main__":
     hdu = fits.PrimaryHDU(data=np.flip(model_image.numpy(), axis=[0]), header=header)#np.flip(model_image.numpy().T, axis=[0,1])
     hdul = fits.HDUList([hdu])
     hdul.writeto(f"{SAVE_PATH}/{OBJ_NAME}/{OBJ_NAME}_network_reconstruction.fits", overwrite=True)
+
+    header_res = wcs.to_header()
+    header_res["NAXIS"]  = 3
+    header_res["NAXIS1"] = residual_images.shape[-1]
+    header_res["NAXIS2"] = residual_images.shape[-2]
+    header_res["NAXIS3"] = residual_images.shape[0]
+
+    header_res["CTYPE3"] = "CHANNEL"
+    header_res["CUNIT3"] = ""
+    header_res["CRPIX3"] = 1.0
+    header_res["CRVAL3"] = 0.0
+    header_res["CDELT3"] = 1.0
+
+    residual_cube = np.flip(
+    residual_images,
+    axis=[1]   # gleiche Flip-Logik wie beim Model (Ny-Achse)
+    )
+
+    hdu_res = fits.PrimaryHDU(
+        data=residual_cube,
+        header=header_res
+    )
+
+    hdul_res = fits.HDUList([hdu_res])
+    hdul_res.writeto(
+        f"{SAVE_PATH}/{OBJ_NAME}/{OBJ_NAME}_network_residuals.fits",
+        overwrite=True
+    )
+
     print("Finished writing FITS file.")
 
 

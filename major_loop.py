@@ -64,7 +64,7 @@ def wandb_powernorm_image(array, caption="", gamma=0.5, cmap="viridis"):
 
 
 class reconstruction_loop:
-    def __init__(self, data_loader, unet, optimizer, optimizer_major ,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=6000, eps=1e-6, max_resmean=1e-3, device=None):
+    def __init__(self, data_loader, unet, optimizer, optimizer_major ,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=6000, eps=1e-6, max_resmean=1e-3, device=None, SFED=390, noise_factor=0, chan_width=300000, exposure=16):
         self.dataloader = data_loader
         #self.dataset = data_set
         self.unet = unet
@@ -80,6 +80,10 @@ class reconstruction_loop:
         self.resmean = -1
         self.current_epoch = 0
         self.current_cycle = 0
+        self.SFED=SFED
+        self.noise_factor=noise_factor
+        self.chan_width=chan_width
+        self.exposure=exposure
 
         self.device = device if device is not None else (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
         # if device is not None:
@@ -100,6 +104,32 @@ class reconstruction_loop:
         path = os.path.join(self.checkpoint_dir, name)
         torch.save(self.unet.state_dict(), path)
         print(f"[Checkpoint] Saved: {path}")
+
+
+    def generate_noise(self, shape):
+        # scaling factor for the noise
+        factor = 20#1
+
+        # system efficency factor, near 1
+        eta = 0.93
+
+        # taken from simulations
+        chan_width = torch.tensor([self.chan_width])#obs.bandwidths[0] * len(obs.bandwidths)#obs.bandwith ist im Fall von Meerkat 214000
+
+        # corr_int_time
+        exposure = self.exposure #obs.int_time
+
+        # taken from:
+        # https://science.nrao.edu/facilities/vla/docs/manuals/oss/performance/sensitivity
+
+        std = factor * 1 / eta * self.SEFD
+        std /= torch.sqrt(2 * exposure * chan_width)
+        print("STD",std)
+        std=std.item()
+        noise = torch.normal(mean=0, std=std, size=shape, device=self.device)
+        noise = noise + 1.0j * torch.normal(mean=0, std=std, size=shape, device=self.device)
+
+        return noise
 
     def __iter__(self):
         self.current_cycle = 0
@@ -260,9 +290,9 @@ class reconstruction_loop:
             input_image = torch.cat([residual_image.detach(), self.model_image.detach()], dim=1)
             print("Input image shape:", input_image.shape)
             print("Self.model_image shape:", self.model_image.shape)
-            input_image = input_image/torch.max(torch.abs(self.dirty_image)).detach()#residual_image.detach()/torch.max(torch.abs(self.dirty_image.detach()))
+            #input_image = input_image/torch.max(torch.abs(self.dirty_image)).detach()#residual_image.detach()/torch.max(torch.abs(self.dirty_image.detach()))
             prediction = self.unet(input_image, conditioning=train_cycle)
-            prediction = prediction * torch.max(torch.abs(self.dirty_image)).detach()
+            #prediction = prediction * torch.max(torch.abs(self.dirty_image)).detach()
             print("Prediction shape:", prediction.shape)
 
             #Because the network now also receives the model image as input, the network can correct its previous prediction and we can take the absolute value here
@@ -320,13 +350,15 @@ class reconstruction_loop:
         y = y.to(self.device)
         uvw = uvw.to(self.device)
         lmn = lmn.to(self.device)
+        vis = vis.to(self.device)
+        vis += self.generate_noise(vis.shape)
         #if self.current_cycle == 0:
         #    self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat, device=self.device)
         print("Data loaded, starting major cycle steps …")
         for i in range(self.current_cycle+1):
             if i ==0:
                 self.model_vis = torch.zeros(vis.shape, dtype=torch.cfloat, device=self.device)
-            residual_vis = vis.clone().to(self.device) - self.model_vis
+            residual_vis = vis.clone() - self.model_vis
             print(residual_vis.dtype)
             print(residual_vis.shape)
             print(vis.shape)

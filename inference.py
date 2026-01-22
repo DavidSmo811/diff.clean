@@ -63,12 +63,12 @@ class InferenceLoop:
         input_image = torch.cat(
             [residual_image.detach(), self.model_image.detach()], dim=1
         )
-        input_image = input_image / max_dirty
+        #input_image = input_image / max_dirty
 
         with torch.no_grad():
             self.unet.eval()
             prediction = self.unet(input_image, conditioning=train_cycle)
-            prediction = prediction * max_dirty
+            #prediction = prediction * max_dirty
             prediction = torch.abs(prediction)  # wie Training
 
             # Das selbe Addieren wie Training:
