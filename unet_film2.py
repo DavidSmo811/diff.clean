@@ -2,40 +2,65 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-    
+
+
+
 class ConditionalLOFARScaler(nn.Module):
-    def __init__(self, n_channels, num_conditions,
-                 emb_dim=16, init_pos=1.0, init_neg=1.0, eps=1e-6):
+    def __init__(self, n_channels, max_freq=10.0, n_freqs=8, 
+                 init_pos=1.0, init_neg=1.0, eps=1e-6):
         super().__init__()
         self.eps = eps
-
+        self.n_channels = n_channels
+        
+        # Basis-Parameter
         self.log_a_pos_base = nn.Parameter(
             torch.log(torch.ones(1, n_channels, 1, 1) * init_pos)
         )
         self.log_a_neg_base = nn.Parameter(
             torch.log(torch.ones(1, n_channels, 1, 1) * init_neg)
         )
-
-        self.cond_emb = nn.Embedding(num_conditions, emb_dim)
-        self.cond_proj = nn.Linear(emb_dim, 2 * n_channels)
-
-        # 🔑 wichtig: Start bei delta = 0
-        nn.init.zeros_(self.cond_proj.weight)
-        nn.init.zeros_(self.cond_proj.bias)
-
+        
+        # Fourier-Features für Loop-Position
+        self.register_buffer(
+            'freqs', 
+            torch.linspace(0, max_freq, n_freqs)
+        )
+        
+        # MLP für kontinuierliche Modulation
+        emb_dim = 2 * n_freqs  # sin + cos
+        self.mlp = nn.Sequential(
+            nn.Linear(emb_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 2 * n_channels)
+        )
+        
+        # Initialisierung nahe Null
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+    
+    def _positional_encoding(self, loop_idx):
+        # loop_idx: [B] mit Werten 0, 1, 2, ...
+        # Normalisiere auf [0, 1] basierend auf typischen Werten
+        loop_idx = loop_idx.float().unsqueeze(-1)  # [B, 1]
+        
+        # Fourier-Features
+        angles = 2 * torch.pi * loop_idx * self.freqs  # [B, n_freqs]
+        emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        return emb
+    
     def _get_params(self, conditioning):
-        emb = self.cond_emb(conditioning)
-        delta = self.cond_proj(emb)   # [B, 2*C]
-
+        emb = self._positional_encoding(conditioning)  # [B, 2*n_freqs]
+        delta = self.mlp(emb)  # [B, 2*C]
+        
         delta_pos, delta_neg = delta.chunk(2, dim=1)
-
         log_a_pos = self.log_a_pos_base + delta_pos.unsqueeze(-1).unsqueeze(-1)
         log_a_neg = self.log_a_neg_base + delta_neg.unsqueeze(-1).unsqueeze(-1)
+        
         log_a_pos = torch.clamp(log_a_pos, min=-10, max=10)
         log_a_neg = torch.clamp(log_a_neg, min=-10, max=10)
-
+        
         return torch.exp(log_a_pos), torch.exp(log_a_neg)
-
+    
     def forward(self, x, conditioning):
         a_pos, a_neg = self._get_params(conditioning)
         a_pos = a_pos.expand_as(x)
@@ -59,6 +84,64 @@ class ConditionalLOFARScaler(nn.Module):
         z[~pos] = -a_neg[~pos] * torch.expm1(-y[~pos] / (a_neg[~pos] + self.eps))
 
         return z
+
+    
+# class ConditionalLOFARScaler(nn.Module):
+#     def __init__(self, n_channels, num_conditions,
+#                  emb_dim=16, init_pos=1.0, init_neg=1.0, eps=1e-6):
+#         super().__init__()
+#         self.eps = eps
+
+#         self.log_a_pos_base = nn.Parameter(
+#             torch.log(torch.ones(1, n_channels, 1, 1) * init_pos)
+#         )
+#         self.log_a_neg_base = nn.Parameter(
+#             torch.log(torch.ones(1, n_channels, 1, 1) * init_neg)
+#         )
+
+#         self.cond_emb = nn.Embedding(num_conditions, emb_dim)
+#         self.cond_proj = nn.Linear(emb_dim, 2 * n_channels)
+
+#         # 🔑 wichtig: Start bei delta = 0
+#         nn.init.zeros_(self.cond_proj.weight)
+#         nn.init.zeros_(self.cond_proj.bias)
+
+#     def _get_params(self, conditioning):
+#         emb = self.cond_emb(conditioning)
+#         delta = self.cond_proj(emb)   # [B, 2*C]
+
+#         delta_pos, delta_neg = delta.chunk(2, dim=1)
+
+#         log_a_pos = self.log_a_pos_base + delta_pos.unsqueeze(-1).unsqueeze(-1)
+#         log_a_neg = self.log_a_neg_base + delta_neg.unsqueeze(-1).unsqueeze(-1)
+#         log_a_pos = torch.clamp(log_a_pos, min=-10, max=10)
+#         log_a_neg = torch.clamp(log_a_neg, min=-10, max=10)
+
+#         return torch.exp(log_a_pos), torch.exp(log_a_neg)
+
+#     def forward(self, x, conditioning):
+#         a_pos, a_neg = self._get_params(conditioning)
+#         a_pos = a_pos.expand_as(x)
+#         a_neg = a_neg.expand_as(x)
+
+#         pos = x >= 0
+#         y = torch.empty_like(x)
+
+#         y[pos] = a_pos[pos] * torch.log1p(x[pos] / (a_pos[pos] + self.eps))
+#         y[~pos] = -a_neg[~pos] * torch.log1p(-x[~pos] / (a_neg[~pos] + self.eps))
+#         return y
+    
+#     def inverse(self, y, conditioning):
+#         a_pos, a_neg = self._get_params(conditioning)
+#         a_pos = a_pos.expand_as(y)
+#         a_neg = a_neg.expand_as(y)
+
+#         pos = y >= 0
+#         z = torch.empty_like(y)
+#         z[pos] = a_pos[pos] * torch.expm1(y[pos] / (a_pos[pos] + self.eps))
+#         z[~pos] = -a_neg[~pos] * torch.expm1(-y[~pos] / (a_neg[~pos] + self.eps))
+
+#         return z
 
 class LearnableLOFARScaler(nn.Module):
     def __init__(self, n_channels, init_pos=1.0, init_neg=1.0, eps=1e-6):
@@ -177,13 +260,13 @@ class UNet(nn.Module):
         if self.Conditional_Scaling:
             self.input_scaler = ConditionalLOFARScaler(
                 n_channels=in_channels,
-                num_conditions=num_conditions,
+                max_freq=num_conditions,
                 init_pos=1.0,
                 init_neg=1.0,
             )
             self.output_scaler = ConditionalLOFARScaler(
                 n_channels=out_channels,
-                num_conditions=num_conditions,
+                max_freq=num_conditions,
                 init_pos=1,
                 init_neg=1,
             )
@@ -215,8 +298,8 @@ class UNet(nn.Module):
         self.condition_proj = nn.Linear(16, sum(self.film_layout))
 
         # Output leicht positiv
-        self.output_scale = nn.Parameter(torch.tensor(1e-2))#0.005
-        self.output_bias = nn.Parameter(torch.tensor(0.001))#0.001
+        self.output_scale = nn.Parameter(torch.tensor(1e-4))#1e-2#0.005
+        self.output_bias = nn.Parameter(torch.tensor(0.0001))#0.001#0.001
 
         self._init_weights()
 

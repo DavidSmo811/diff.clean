@@ -48,8 +48,8 @@ class AdaptiveRadioReconstructionLoss(nn.Module):
         if mask_faint.sum() > 0:
             # Für diffuse Emission: Log-Loss ist besser (Dynamikbereich)
             loss_faint = nn.HuberLoss()(
-                torch.log(torch.abs(pred * mask_faint) + 1e-7),
-                torch.log(torch.abs(target * mask_faint) + 1e-7)
+                torch.log(torch.abs(pred * mask_faint) + 1e-10),#1e-7 vorher
+                torch.log(torch.abs(target * mask_faint) + 1e-10)#1e-7 vorher
             )
             # Kleinstes Gewicht
             total_loss += 1.0 * loss_faint

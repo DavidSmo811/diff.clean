@@ -64,7 +64,7 @@ def wandb_powernorm_image(array, caption="", gamma=0.5, cmap="viridis"):
 
 
 class reconstruction_loop:
-    def __init__(self, data_loader, unet, optimizer, optimizer_major ,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=6000, eps=1e-6, max_resmean=1e-3, device=None, SFED=390, noise_factor=0, chan_width=300000, exposure=16):
+    def __init__(self, data_loader, unet, optimizer, optimizer_major ,num_max_major_cycle, epochs, pix_size=512, fov_arcsec=1024, eps=1e-6, max_resmean=1e-3, device=None, SEFD=390, noise_factor=1, chan_width=214000, exposure=16):#1671875
         self.dataloader = data_loader
         #self.dataset = data_set
         self.unet = unet
@@ -80,7 +80,7 @@ class reconstruction_loop:
         self.resmean = -1
         self.current_epoch = 0
         self.current_cycle = 0
-        self.SFED=SFED
+        self.SEFD=SEFD
         self.noise_factor=noise_factor
         self.chan_width=chan_width
         self.exposure=exposure
@@ -107,8 +107,6 @@ class reconstruction_loop:
 
 
     def generate_noise(self, shape):
-        # scaling factor for the noise
-        factor = 20#1
 
         # system efficency factor, near 1
         eta = 0.93
@@ -122,7 +120,7 @@ class reconstruction_loop:
         # taken from:
         # https://science.nrao.edu/facilities/vla/docs/manuals/oss/performance/sensitivity
 
-        std = factor * 1 / eta * self.SEFD
+        std = self.noise_factor * 1 / eta * self.SEFD # noise_factor is the scaling factor to adjust the noise level
         std /= torch.sqrt(2 * exposure * chan_width)
         print("STD",std)
         std=std.item()
@@ -346,7 +344,7 @@ class reconstruction_loop:
         print("Loading lmn")
         lmn = x[2].float()
         batchsize=int(vis.shape[0])
-        y=y[:,0,:,:]+y[:,1,:,:]
+        #y=y[:,0,:,:]+y[:,1,:,:]
         y = y.to(self.device)
         uvw = uvw.to(self.device)
         lmn = lmn.to(self.device)

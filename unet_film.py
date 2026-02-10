@@ -19,6 +19,43 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
+class LearnableLOFARScaler(nn.Module):
+    def __init__(self, n_channels, init_pos=1.0, init_neg=1.0, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+
+        self.log_a_pos = nn.Parameter(torch.log(torch.ones(1, n_channels, 1, 1) * init_pos))
+        self.log_a_neg = nn.Parameter(torch.log(torch.ones(1, n_channels, 1, 1) * init_neg))
+
+    def forward(self, x):
+        a_pos = torch.exp(self.log_a_pos)
+        a_neg = torch.exp(self.log_a_neg)
+
+        pos = x >= 0
+        neg = ~pos
+
+        out = torch.zeros_like(x)
+        out[pos] =  a_pos[pos] * torch.log1p(x[pos] / (a_pos[pos] + self.eps))
+        out[neg] = -a_neg[neg] * torch.log1p(-x[neg] / (a_neg[neg] + self.eps))
+        return out
+
+    def inverse(self, y):
+        a_pos = torch.exp(self.log_a_pos[:,-1,...])
+        a_neg = torch.exp(self.log_a_neg[:,-1,...])
+
+        pos = y >= 0
+        neg = ~pos
+
+        out = torch.zeros_like(y)
+        out[pos] =  a_pos[pos] * torch.expm1(y[pos] / (a_pos[pos] + self.eps))
+        out[neg] = -a_neg[neg] * torch.expm1(-y[neg] / (a_neg[neg] + self.eps))
+        return out
+
+
+
+
+
 class DoubleConv(nn.Module):
     """(conv => BN => ReLU) * 2"""
     def __init__(self, in_ch, out_ch):
@@ -110,6 +147,11 @@ class UNet(nn.Module):
         self.base_c = base_c
         self.num_levels = num_levels
         self.bilinear = bilinear
+        self.input_scaler = LearnableLOFARScaler(
+        n_channels=in_channels,
+        init_pos=1.0,
+        init_neg=1.0
+        )
 
         # Build encoder and decoder channel sizes
         enc_channels = [base_c * (2 ** i) for i in range(num_levels)]
@@ -227,6 +269,9 @@ class UNet(nn.Module):
         conditioning: int or tensor (B,) of ints
         """
         # Build FiLM parameters
+
+        x = self.input_scaler(x)
+
         films = self._make_film(conditioning)
         film_idx = 0
 
@@ -268,6 +313,8 @@ class UNet(nn.Module):
         out = self.outc(x_up)
         # Soft biasing toward positive but not enforced
         out = out * self.output_scale + self.output_bias
+
+        out = self.input_scaler.inverse(out)
 
         return out
 
